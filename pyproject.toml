@@ -1,0 +1,20 @@
+[project]
+name = "story-time"
+version = "0.1.0"
+description = ""
+authors = [
+    {name = "Grisha Szep",email = "grisha.szep@gmail.com"}
+]
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+]
+
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry.group.dev.dependencies]
+mypy = "^1.15.0"
+
