@@ -9,9 +9,7 @@ def process_text(prompt):
     image.save("output.png")
 
 
-pipe = AutoPipelineForText2Image.from_pretrained(
-    "stabilityai/sd-turbo", torch_dtype=torch.float16, variant="fp16"
-)
+pipe = AutoPipelineForText2Image.from_pretrained("stabilityai/sd-turbo", torch_dtype=torch.float16, variant="fp16")
 pipe.to("cuda")
 
 
