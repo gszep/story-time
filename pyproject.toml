@@ -3,15 +3,14 @@ authors = [
   {name = "Grisha Szep", email = "grisha.szep@gmail.com"},
 ]
 dependencies = [
-  "torchaudio (>=2.6.0,<3.0.0)",
-  "realtimestt (>=0.3.95,<0.4.0)",
-  "torchvision (>=0.21.0,<0.22.0)",
-  "diffusers (==0.24)",
-  "transformers (==4.49)",
-  "accelerate (>=1.4.0,<2.0.0)",
-  "xformers (>=0.0.29.post3,<0.0.30)",
   "streamdiffusion[tensorrt] (>=0.1.1,<0.2.0)",
-  "torch (>=2.6.0,<3.0.0)",
+  "torch (==2.1.0)",
+  "torchvision (==0.16.0)",
+  "numpy (<2)",
+  "huggingface-hub (<=0.25.0)",
+  "onnx-graphsurgeon (>=0.5.6,<0.6.0)",
+  "polygraphy (==0.47.1)",
+  "tensorrt-cu11 (>=10.9.0.34,<11.0.0.0)",
 ]
 description = ""
 name = "story-time"
@@ -26,15 +25,22 @@ requires = ["poetry-core>=2.0.0,<3.0.0"]
 [tool.poetry.group.dev.dependencies]
 mypy = "^1.15.0"
 
-
 [[tool.poetry.source]]
 name = "cu118"
-url = "https://download.pytorch.org/whl/cu118"
 priority = "explicit"
+url = "https://download.pytorch.org/whl/cu118"
 
+[[tool.poetry.source]]
+name = "ngc"
+priority = "explicit"
+url = "https://pypi.ngc.nvidia.com"
 
 [tool.poetry.dependencies]
 torch = {source = "cu118"}
+torchaudio = {source = "cu118"}
+torchvision = {source = "cu118"}
+polygraphy = {source = "ngc"}
+
 [tool.black]
 include = '\.pyi?$'
 line-length = 140

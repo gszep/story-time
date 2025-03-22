@@ -9,3 +9,6 @@ __pycache__/
 
 *.png
 *.log
+
+# gpu acceleration files
+engines
