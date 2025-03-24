@@ -13,6 +13,7 @@ dependencies = [
   "tensorrt-cu12 (>=10.9.0.34,<11.0.0.0)",
   "tensorrt-cu12-libs (>=10.9.0.34,<11.0.0.0)",
   "tensorrt-cu12-bindings (>=10.9.0.34,<11.0.0.0)",
+  "realtimestt (>=0.3.100,<0.4.0)",
 ]
 description = ""
 name = "story-time"

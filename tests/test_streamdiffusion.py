@@ -1,13 +1,9 @@
-import os
-import sys
 import time
 from multiprocessing import Queue, get_context
 from typing import Literal
 from story_time.utils.viewer import receive_images
 from story_time.utils.wrapper import StreamDiffusionWrapper
 import fire
-
-sys.path.append(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 
 def image_generation_process(
