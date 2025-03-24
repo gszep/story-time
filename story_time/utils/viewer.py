@@ -23,9 +23,9 @@ def update_image(image_data: Image.Image, label: tk.Label) -> None:
     """
     width = 512
     height = 512
-    tk_image = ImageTk.PhotoImage(image_data, size=width)
-    label.configure(image=tk_image, width=width, height=height)
-    label.image = tk_image  # keep a reference
+    tk_image = ImageTk.PhotoImage(image_data, size=(width, height))
+    label.configure(image=tk_image, width=width, height=height)  # type: ignore
+    label.image = tk_image  # type: ignore
 
 
 def _receive_images(queue: Queue, fps_queue: Queue, label: tk.Label, fps_label: tk.Label) -> None:
