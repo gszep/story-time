@@ -34,7 +34,6 @@ class StreamDiffusionWrapper:
         width: int = 512,
         height: int = 512,
         warmup: int = 10,
-        acceleration: Literal["none", "xformers", "tensorrt"] = "tensorrt",
         do_add_noise: bool = True,
         device_ids: Optional[List[int]] = None,
         use_lcm_lora: bool = True,
@@ -85,8 +84,6 @@ class StreamDiffusionWrapper:
             The height of the image, by default 512.
         warmup : int, optional
             The number of warmup steps to perform, by default 10.
-        acceleration : Literal["none", "xformers", "tensorrt"], optional
-            The acceleration method, by default "tensorrt".
         do_add_noise : bool, optional
             Whether to add noise for following denoising steps or not,
             by default True.
@@ -145,7 +142,6 @@ class StreamDiffusionWrapper:
             lcm_lora_id=lcm_lora_id,
             vae_id=vae_id,
             t_index_list=t_index_list,
-            acceleration=acceleration,
             warmup=warmup,
             do_add_noise=do_add_noise,
             use_lcm_lora=use_lcm_lora,
@@ -334,7 +330,6 @@ class StreamDiffusionWrapper:
         lora_dict: Optional[Dict[str, float]] = None,
         lcm_lora_id: Optional[str] = None,
         vae_id: Optional[str] = None,
-        acceleration: Literal["none", "xformers", "tensorrt"] = "tensorrt",
         warmup: int = 10,
         do_add_noise: bool = True,
         use_lcm_lora: bool = True,
@@ -351,7 +346,7 @@ class StreamDiffusionWrapper:
         1. Loads the model from the model_id_or_path.
         2. Loads and fuses the LCM-LoRA model from the lcm_lora_id if needed.
         3. Loads the VAE model from the vae_id if needed.
-        4. Enables acceleration if needed.
+        4. Enables acceleration with TensorRT.
         5. Prepares the model for inference.
         6. Load the safety checker if needed.
 
@@ -369,8 +364,6 @@ class StreamDiffusionWrapper:
             The lcm_lora_id to load, by default None.
         vae_id : Optional[str], optional
             The vae_id to load, by default None.
-        acceleration : Literal["none", "xfomers", "sfast", "tensorrt"], optional
-            The acceleration method, by default "tensorrt".
         warmup : int, optional
             The number of warmup steps to perform, by default 10.
         do_add_noise : bool, optional
@@ -439,167 +432,157 @@ class StreamDiffusionWrapper:
                 stream.vae = AutoencoderTiny.from_pretrained("madebyollin/taesd").to(device=pipe.device, dtype=pipe.dtype)
 
         try:
-            if acceleration == "xformers":
-                stream.pipe.enable_xformers_memory_efficient_attention()
-            if acceleration == "tensorrt":
-                from polygraphy import cuda
-                from streamdiffusion.acceleration.tensorrt import (
-                    TorchVAEEncoder,
-                    compile_unet,
-                    compile_vae_decoder,
-                    compile_vae_encoder,
+            from polygraphy import cuda
+            from streamdiffusion.acceleration.tensorrt import (
+                TorchVAEEncoder,
+                compile_unet,
+                compile_vae_decoder,
+                compile_vae_encoder,
+            )
+            from streamdiffusion.acceleration.tensorrt.engine import (
+                AutoencoderKLEngine,
+                UNet2DConditionModelEngine,
+            )
+            from streamdiffusion.acceleration.tensorrt.models import (
+                VAE,
+                UNet,
+                VAEEncoder,
+            )
+
+            from streamdiffusion.acceleration.tensorrt.utilities import Engine, numpy_to_torch_dtype_dict
+            import tensorrt as trt
+
+            def create_prefix(
+                model_id_or_path: str,
+                max_batch_size: int,
+                min_batch_size: int,
+            ):
+                maybe_path = Path(model_id_or_path)
+                if maybe_path.exists():
+                    return f"{maybe_path.stem}--lcm_lora-{use_lcm_lora}--tiny_vae-{use_tiny_vae}--max_batch-{max_batch_size}--min_batch-{min_batch_size}--mode-{self.mode}"
+                else:
+                    return f"{model_id_or_path}--lcm_lora-{use_lcm_lora}--tiny_vae-{use_tiny_vae}--max_batch-{max_batch_size}--min_batch-{min_batch_size}--mode-{self.mode}"
+
+            engine_dir = Path(engine_dir)
+            unet_path = os.path.join(
+                engine_dir,
+                create_prefix(
+                    model_id_or_path=model_id_or_path,
+                    max_batch_size=stream.trt_unet_batch_size,
+                    min_batch_size=stream.trt_unet_batch_size,
+                ),
+                "unet.engine",
+            )
+            vae_encoder_path = os.path.join(
+                engine_dir,
+                create_prefix(
+                    model_id_or_path=model_id_or_path,
+                    max_batch_size=self.batch_size if self.mode == "txt2img" else stream.frame_bff_size,
+                    min_batch_size=self.batch_size if self.mode == "txt2img" else stream.frame_bff_size,
+                ),
+                "vae_encoder.engine",
+            )
+            vae_decoder_path = os.path.join(
+                engine_dir,
+                create_prefix(
+                    model_id_or_path=model_id_or_path,
+                    max_batch_size=self.batch_size if self.mode == "txt2img" else stream.frame_bff_size,
+                    min_batch_size=self.batch_size if self.mode == "txt2img" else stream.frame_bff_size,
+                ),
+                "vae_decoder.engine",
+            )
+
+            if not os.path.exists(unet_path):
+                os.makedirs(os.path.dirname(unet_path), exist_ok=True)
+                unet_model = UNet(
+                    fp16=True,
+                    device=stream.device,
+                    max_batch_size=stream.trt_unet_batch_size,
+                    min_batch_size=stream.trt_unet_batch_size,
+                    embedding_dim=stream.text_encoder.config.hidden_size,
+                    unet_dim=stream.unet.config.in_channels,
                 )
-                from streamdiffusion.acceleration.tensorrt.engine import (
-                    AutoencoderKLEngine,
-                    UNet2DConditionModelEngine,
-                )
-                from streamdiffusion.acceleration.tensorrt.models import (
-                    VAE,
-                    UNet,
-                    VAEEncoder,
-                )
-
-                from streamdiffusion.acceleration.tensorrt.utilities import Engine, numpy_to_torch_dtype_dict
-                import tensorrt as trt
-
-                def create_prefix(
-                    model_id_or_path: str,
-                    max_batch_size: int,
-                    min_batch_size: int,
-                ):
-                    maybe_path = Path(model_id_or_path)
-                    if maybe_path.exists():
-                        return f"{maybe_path.stem}--lcm_lora-{use_lcm_lora}--tiny_vae-{use_tiny_vae}--max_batch-{max_batch_size}--min_batch-{min_batch_size}--mode-{self.mode}"
-                    else:
-                        return f"{model_id_or_path}--lcm_lora-{use_lcm_lora}--tiny_vae-{use_tiny_vae}--max_batch-{max_batch_size}--min_batch-{min_batch_size}--mode-{self.mode}"
-
-                engine_dir = Path(engine_dir)
-                unet_path = os.path.join(
-                    engine_dir,
-                    create_prefix(
-                        model_id_or_path=model_id_or_path,
-                        max_batch_size=stream.trt_unet_batch_size,
-                        min_batch_size=stream.trt_unet_batch_size,
-                    ),
-                    "unet.engine",
-                )
-                vae_encoder_path = os.path.join(
-                    engine_dir,
-                    create_prefix(
-                        model_id_or_path=model_id_or_path,
-                        max_batch_size=self.batch_size if self.mode == "txt2img" else stream.frame_bff_size,
-                        min_batch_size=self.batch_size if self.mode == "txt2img" else stream.frame_bff_size,
-                    ),
-                    "vae_encoder.engine",
-                )
-                vae_decoder_path = os.path.join(
-                    engine_dir,
-                    create_prefix(
-                        model_id_or_path=model_id_or_path,
-                        max_batch_size=self.batch_size if self.mode == "txt2img" else stream.frame_bff_size,
-                        min_batch_size=self.batch_size if self.mode == "txt2img" else stream.frame_bff_size,
-                    ),
-                    "vae_decoder.engine",
+                compile_unet(
+                    stream.unet,
+                    unet_model,
+                    unet_path + ".onnx",
+                    unet_path + ".opt.onnx",
+                    unet_path,
+                    opt_batch_size=stream.trt_unet_batch_size,
                 )
 
-                if not os.path.exists(unet_path):
-                    os.makedirs(os.path.dirname(unet_path), exist_ok=True)
-                    unet_model = UNet(
-                        fp16=True,
-                        device=stream.device,
-                        max_batch_size=stream.trt_unet_batch_size,
-                        min_batch_size=stream.trt_unet_batch_size,
-                        embedding_dim=stream.text_encoder.config.hidden_size,
-                        unet_dim=stream.unet.config.in_channels,
-                    )
-                    compile_unet(
-                        stream.unet,
-                        unet_model,
-                        unet_path + ".onnx",
-                        unet_path + ".opt.onnx",
-                        unet_path,
-                        opt_batch_size=stream.trt_unet_batch_size,
-                    )
-
-                if not os.path.exists(vae_decoder_path):
-                    os.makedirs(os.path.dirname(vae_decoder_path), exist_ok=True)
-                    stream.vae.forward = stream.vae.decode
-                    vae_decoder_model = VAE(
-                        device=stream.device,
-                        max_batch_size=self.batch_size if self.mode == "txt2img" else stream.frame_bff_size,
-                        min_batch_size=self.batch_size if self.mode == "txt2img" else stream.frame_bff_size,
-                    )
-                    compile_vae_decoder(
-                        stream.vae,
-                        vae_decoder_model,
-                        vae_decoder_path + ".onnx",
-                        vae_decoder_path + ".opt.onnx",
-                        vae_decoder_path,
-                        opt_batch_size=self.batch_size if self.mode == "txt2img" else stream.frame_bff_size,
-                    )
-                    delattr(stream.vae, "forward")
-
-                if not os.path.exists(vae_encoder_path):
-                    os.makedirs(os.path.dirname(vae_encoder_path), exist_ok=True)
-                    vae_encoder = TorchVAEEncoder(stream.vae).to(torch.device("cuda"))
-                    vae_encoder_model = VAEEncoder(
-                        device=stream.device,
-                        max_batch_size=self.batch_size if self.mode == "txt2img" else stream.frame_bff_size,
-                        min_batch_size=self.batch_size if self.mode == "txt2img" else stream.frame_bff_size,
-                    )
-                    compile_vae_encoder(
-                        vae_encoder,
-                        vae_encoder_model,
-                        vae_encoder_path + ".onnx",
-                        vae_encoder_path + ".opt.onnx",
-                        vae_encoder_path,
-                        opt_batch_size=self.batch_size if self.mode == "txt2img" else stream.frame_bff_size,
-                    )
-
-                cuda_stream = cuda.Stream()
-
-                vae_config = stream.vae.config
-                vae_dtype = stream.vae.dtype
-
-                # patch Engine.allocate_buffers method
-                def allocate_buffers(self, shape_dict=None, device="cuda"):
-                    for idx in range(self.engine.num_io_tensors):
-                        tensor_name = self.engine.get_tensor_name(idx)
-                        if shape_dict and tensor_name in shape_dict:
-                            shape = shape_dict[tensor_name]
-                        else:
-                            shape = self.engine.get_tensor_shape(tensor_name)
-                        dtype = trt.nptype(self.engine.get_tensor_dtype(tensor_name))
-                        if self.engine.get_tensor_mode(tensor_name) == trt.TensorIOMode.INPUT:
-                            self.context.set_input_shape(tensor_name, shape)
-
-                        tensor = torch.empty(tuple(shape), dtype=numpy_to_torch_dtype_dict[dtype]).to(device=device)
-                        self.tensors[tensor_name] = tensor
-
-                Engine.allocate_buffers = allocate_buffers
-
-                stream.unet = UNet2DConditionModelEngine(unet_path, cuda_stream, use_cuda_graph=False)
-                stream.vae = AutoencoderKLEngine(
-                    vae_encoder_path,
+            if not os.path.exists(vae_decoder_path):
+                os.makedirs(os.path.dirname(vae_decoder_path), exist_ok=True)
+                stream.vae.forward = stream.vae.decode
+                vae_decoder_model = VAE(
+                    device=stream.device,
+                    max_batch_size=self.batch_size if self.mode == "txt2img" else stream.frame_bff_size,
+                    min_batch_size=self.batch_size if self.mode == "txt2img" else stream.frame_bff_size,
+                )
+                compile_vae_decoder(
+                    stream.vae,
+                    vae_decoder_model,
+                    vae_decoder_path + ".onnx",
+                    vae_decoder_path + ".opt.onnx",
                     vae_decoder_path,
-                    cuda_stream,
-                    stream.pipe.vae_scale_factor,
-                    use_cuda_graph=False,
+                    opt_batch_size=self.batch_size if self.mode == "txt2img" else stream.frame_bff_size,
                 )
-                setattr(stream.vae, "config", vae_config)
-                setattr(stream.vae, "dtype", vae_dtype)
+                delattr(stream.vae, "forward")
 
-                gc.collect()
-                torch.cuda.empty_cache()
-
-                print("TensorRT acceleration enabled.")
-            if acceleration == "sfast":
-                from streamdiffusion.acceleration.sfast import (
-                    accelerate_with_stable_fast,
+            if not os.path.exists(vae_encoder_path):
+                os.makedirs(os.path.dirname(vae_encoder_path), exist_ok=True)
+                vae_encoder = TorchVAEEncoder(stream.vae).to(torch.device("cuda"))
+                vae_encoder_model = VAEEncoder(
+                    device=stream.device,
+                    max_batch_size=self.batch_size if self.mode == "txt2img" else stream.frame_bff_size,
+                    min_batch_size=self.batch_size if self.mode == "txt2img" else stream.frame_bff_size,
+                )
+                compile_vae_encoder(
+                    vae_encoder,
+                    vae_encoder_model,
+                    vae_encoder_path + ".onnx",
+                    vae_encoder_path + ".opt.onnx",
+                    vae_encoder_path,
+                    opt_batch_size=self.batch_size if self.mode == "txt2img" else stream.frame_bff_size,
                 )
 
-                stream = accelerate_with_stable_fast(stream)
-                print("StableFast acceleration enabled.")
+            cuda_stream = cuda.Stream()
+
+            vae_config = stream.vae.config
+            vae_dtype = stream.vae.dtype
+
+            # patch Engine.allocate_buffers method
+            def allocate_buffers(self, shape_dict=None, device="cuda"):
+                for idx in range(self.engine.num_io_tensors):
+                    tensor_name = self.engine.get_tensor_name(idx)
+                    if shape_dict and tensor_name in shape_dict:
+                        shape = shape_dict[tensor_name]
+                    else:
+                        shape = self.engine.get_tensor_shape(tensor_name)
+                    dtype = trt.nptype(self.engine.get_tensor_dtype(tensor_name))
+                    if self.engine.get_tensor_mode(tensor_name) == trt.TensorIOMode.INPUT:
+                        self.context.set_input_shape(tensor_name, shape)
+
+                    tensor = torch.empty(tuple(shape), dtype=numpy_to_torch_dtype_dict[dtype]).to(device=device)
+                    self.tensors[tensor_name] = tensor
+
+            Engine.allocate_buffers = allocate_buffers
+
+            stream.unet = UNet2DConditionModelEngine(unet_path, cuda_stream, use_cuda_graph=False)
+            stream.vae = AutoencoderKLEngine(
+                vae_encoder_path,
+                vae_decoder_path,
+                cuda_stream,
+                stream.pipe.vae_scale_factor,
+                use_cuda_graph=False,
+            )
+            setattr(stream.vae, "config", vae_config)
+            setattr(stream.vae, "dtype", vae_dtype)
+
+            gc.collect()
+            torch.cuda.empty_cache()
+            print("TensorRT acceleration enabled.")
+
         except Exception:
             traceback.print_exc()
             print("Acceleration has failed. Falling back to normal mode.")
