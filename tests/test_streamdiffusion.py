@@ -1,51 +1,98 @@
-import torch
-from diffusers import AutoencoderTiny, StableDiffusionPipeline
+import os
+import sys
+import time
+from multiprocessing import Queue, get_context
+from typing import Literal
 
-from streamdiffusion.acceleration.tensorrt import accelerate_with_tensorrt
+import fire
 
-from streamdiffusion import StreamDiffusion
-from streamdiffusion.image_utils import postprocess_image
+sys.path.append(os.path.join(os.path.dirname(__file__), "..", ".."))
 
-# You can load any models using diffuser's StableDiffusionPipeline
-pipe = StableDiffusionPipeline.from_pretrained("KBlueLeaf/kohaku-v2.1").to(
-    device=torch.device("cuda"),
-    dtype=torch.float16,
-)
-
-# Wrap the pipeline in StreamDiffusion
-# Requires more long steps (len(t_index_list)) in text2image
-# You recommend to use cfg_type="none" when text2image
-stream = StreamDiffusion(
-    pipe,
-    t_index_list=[0, 16, 32, 45],
-    torch_dtype=torch.float16,
-    cfg_type="none",
-)
-
-# If the loaded model is not LCM, merge LCM
-stream.load_lcm_lora()
-stream.fuse_lora()
-# Use Tiny VAE for further acceleration
-stream.vae = AutoencoderTiny.from_pretrained("madebyollin/taesd").to(device=pipe.device, dtype=pipe.dtype)
-# Enable acceleration
-
-# stream = accelerate_with_tensorrt(
-#     stream,
-#     "engines",
-#     max_batch_size=2,
-# )
+from story_time.utils.viewer import receive_images
+from story_time.utils.wrapper import StreamDiffusionWrapper
 
 
-prompt = "1girl with dog hair, thick frame glasses"
-# Prepare the stream
-stream.prepare(prompt)
+def image_generation_process(
+    queue: Queue,
+    fps_queue: Queue,
+    prompt: str,
+    model_id_or_path: str,
+    acceleration: Literal["none", "xformers", "tensorrt"] = "tensorrt",
+) -> None:
+    """
+    Process for generating images based on a prompt using a specified model.
 
-# Warmup >= len(t_index_list) x frame_buffer_size
-for _ in range(4):
-    stream()
+    Parameters
+    ----------
+    queue : Queue
+        The queue to put the generated images in.
+    fps_queue : Queue
+        The queue to put the calculated fps.
+    prompt : str
+        The prompt to generate images from.
+    model_id_or_path : str
+        The name of the model to use for image generation.
+    acceleration : Literal["none", "xformers", "tensorrt"]
+        The type of acceleration to use for image generation.
+    """
+    stream = StreamDiffusionWrapper(
+        model_id_or_path=model_id_or_path,
+        t_index_list=[0],
+        frame_buffer_size=1,
+        warmup=10,
+        acceleration=acceleration,
+        use_lcm_lora=False,
+        mode="txt2img",
+        cfg_type="none",
+        use_denoising_batch=True,
+    )
 
-# Run the stream infinitely
-while True:
-    x_output = stream.txt2img()
-    image = postprocess_image(x_output, output_type="pil")[0]
-    image.save("output.png")
+    stream.prepare(
+        prompt=prompt,
+        num_inference_steps=50,
+    )
+
+    while True:
+        try:
+            start_time = time.time()
+
+            x_outputs = stream.stream.txt2img_sd_turbo(1).cpu()
+            queue.put(x_outputs, block=False)
+
+            fps = 1 / (time.time() - start_time)
+            fps_queue.put(fps)
+        except KeyboardInterrupt:
+            print(f"fps: {fps}")
+            return
+
+
+def main(
+    prompt: str = "cat with sunglasses and a hat, photoreal, 8K",
+    model_id_or_path: str = "stabilityai/sd-turbo",
+    acceleration: Literal["none", "xformers", "tensorrt"] = "tensorrt",
+) -> None:
+    """
+    Main function to start the image generation and viewer processes.
+    """
+    ctx = get_context("spawn")
+    queue = ctx.Queue()
+    fps_queue = ctx.Queue()
+    process1 = ctx.Process(
+        target=image_generation_process,
+        args=(queue, fps_queue, prompt, model_id_or_path, acceleration),
+    )
+    process1.start()
+
+    process2 = ctx.Process(target=receive_images, args=(queue, fps_queue))
+    process2.start()
+
+    process1.join()
+    process2.join()
+
+
+def test_streamdiffusion():
+    fire.Fire(main)
+
+
+if __name__ == "__main__":
+    test_streamdiffusion()
