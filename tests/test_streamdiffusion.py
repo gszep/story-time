@@ -1,17 +1,25 @@
 import fire
 import time
+import warnings
+
 from multiprocessing import Queue, get_context
 from RealtimeSTT import AudioToTextRecorder
 
 from story_time.utils.viewer import receive_images
 from story_time.utils.wrapper import StreamDiffusionWrapper
 
+warnings.simplefilter(action="ignore", category=FutureWarning)
+
 
 def speech_transcription_process(prompt_queue: Queue) -> None:
     recorder = AudioToTextRecorder()
 
+    def parse_text(text: str):
+        prompt_queue.put(text, block=False)
+        print(f"{text}")
+
     while True:
-        recorder.text(lambda x: prompt_queue.put(x, block=False))
+        recorder.text(parse_text)
 
 
 def image_generation_process(
@@ -57,7 +65,7 @@ def image_generation_process(
                 f"{prompt_queue.get(block=False)}, line art drawing. professional, sleek, modern, minimalist, graphic, line art, vector graphics"
             )
 
-        x_outputs = stream.stream.txt2img_sd_turbo(1).cpu()
+        x_outputs = stream.stream(queue.get(block=False) if not queue.empty() else None).cpu()
         queue.put(x_outputs, block=False)
 
         fps = 1 / (time.time() - start_time)

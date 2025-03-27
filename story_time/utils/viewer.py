@@ -55,7 +55,6 @@ def _receive_images(queue: Queue, fps_queue: Queue, label: tk.Label, fps_label: 
             if not fps_queue.empty():
                 fps_label.config(text=f"FPS: {fps_queue.get(block=False):.2f}")
 
-            time.sleep(0.0005)
         except KeyboardInterrupt:
             return
 
